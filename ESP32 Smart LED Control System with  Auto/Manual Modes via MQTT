@@ -1,0 +1,103 @@
+import network
+import time
+import math
+from machine import Pin, ADC
+from umqtt.simple import MQTTClient
+
+# ==== WiFi Settings ====
+WIFI_SSID = "Wokwi-GUEST"
+WIFI_PASSWORD = ""
+
+# ==== MQTT Settings ====
+MQTT_BROKER = "broker.hivemq.com"
+CLIENT_ID = "esp32_client"
+TOPIC_CONTROL = b"esp32/control"
+TOPIC_TEMP = b"esp32/temp"
+TOPIC_STATUS = b"esp32/status"
+
+# ==== Hardware Setup ====
+relay = Pin(4, Pin.OUT)
+adc = ADC(Pin(34))
+adc.width(ADC.WIDTH_12BIT)
+adc.atten(ADC.ATTN_11DB)
+
+# ==== System Parameters ====
+BETA = 3950
+R0 = 10000
+T0 = 298.15
+VCC = 3.3
+THRESHOLD = 30
+mode = "manual"
+relay_state = False
+
+# ==== WiFi Connection ====
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+    while not wlan.isconnected():
+        print("Connecting to WiFi...")
+        time.sleep(1)
+    print("✅ Connected to WiFi:", wlan.ifconfig())
+
+# ==== Relay Control ====
+def update_relay(state):
+    global relay_state
+    relay_state = state
+    relay.value(1 if state else 0)
+
+# ==== Status Publisher ====
+def publish_status(client):
+    status = f"Mode: {mode}, Relay: {'ON' if relay_state else 'OFF'}"
+    client.publish(TOPIC_STATUS, status)
+
+# ==== Temperature Sensor ====
+def read_temperature():
+    analog_value = adc.read()
+    voltage = analog_value * VCC / 4095
+    resistance = R0 * voltage / (VCC - voltage)
+    temp_k = 1 / (1 / T0 + (1 / BETA) * math.log(resistance / R0))
+    temp_c = temp_k - 273.15
+    print(f"ADC: {analog_value} | Voltage: {voltage:.2f}V | Resistance: {resistance:.2f}Ω | Temp: {temp_c:.2f}°C")
+    return temp_c
+
+# ==== MQTT Callback ====
+def sub_cb(topic, msg):
+    global mode
+    msg = msg.decode()
+    if msg == "manual":
+        mode = "manual"
+        print("🔧 Mode changed to MANUAL")
+    elif msg == "auto":
+        mode = "auto"
+        print("🤖 Mode changed to AUTO")
+    elif mode == "manual":
+        if msg == "on":
+            update_relay(True)
+            print("💡 Relay turned ON (Manual)")
+        elif msg == "off":
+            update_relay(False)
+            print("💡 Relay turned OFF (Manual)")
+
+# ==== Main Application ====
+def main():
+    connect_wifi()
+    client = MQTTClient(CLIENT_ID, MQTT_BROKER)
+    client.set_callback(sub_cb)
+    client.connect()
+    print("✅ Connected to MQTT broker")
+    client.subscribe(TOPIC_CONTROL)
+    while True:
+        client.check_msg()
+        temp = read_temperature()
+        client.publish(TOPIC_TEMP, str(round(temp, 2)))
+        print(f"🌡️ Temperature: {temp:.2f} °C")
+        if mode == "auto":
+            if temp > THRESHOLD:
+                update_relay(True)
+            else:
+                update_relay(False)
+        publish_status(client)
+        time.sleep(2)
+
+main()
